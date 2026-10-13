@@ -41,6 +41,22 @@ export function isSecretPath(value = '') {
   return false;
 }
 
+export function sanitizeGitRemote(remote) {
+  if (!remote) return null;
+  const value = String(remote).trim();
+  if (!/^https?:\/\//i.test(value)) return value;
+  try {
+    const parsed = new URL(value);
+    parsed.username = '';
+    parsed.password = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return null;
+  }
+}
+
 export async function sha256File(file) {
   const hash = createHash('sha256');
   await new Promise((resolve, reject) => {
@@ -64,7 +80,7 @@ export function createManifest({ version, platform, includeRepoFiles = false, re
       name: repo.name,
       branch: repo.branch || null,
       commit: repo.commit || null,
-      remote: repo.remote || null
+      remote: sanitizeGitRemote(repo.remote)
     }))
   };
 }
@@ -172,9 +188,11 @@ async function copyPortableTree(source, target) {
     dereference: false,
     errorOnExist: false,
     force: true,
-    filter: src => {
+    filter: async src => {
       const rel = path.relative(source, src).replaceAll('\\', '/');
       if (!rel) return true;
+      const info = await lstat(src).catch(() => null);
+      if (info?.isSymbolicLink()) return false;
       if (rel.split('/').includes('.git')) return false;
       if (rel.split('/').includes('node_modules')) return false;
       return !isSecretPath(rel);
@@ -308,9 +326,16 @@ export function consumeRestorePlan(token, { now = Date.now() } = {}) {
 }
 
 async function archiveEntries(archivePath) {
-  const { stdout } = await exec('tar', ['-tzf', archivePath], { timeout: 30000, maxBuffer: 4_000_000 });
+  const [{ stdout }, { stdout: verbose }] = await Promise.all([
+    exec('tar', ['-tzf', archivePath], { timeout: 30000, maxBuffer: 4_000_000 }),
+    exec('tar', ['-tvzf', archivePath], { timeout: 30000, maxBuffer: 4_000_000 })
+  ]);
   const entries = stdout.split(/\r?\n/).filter(Boolean);
   validateArchiveEntries(entries);
+  for (const line of verbose.split(/\r?\n/).filter(Boolean)) {
+    const type = line[0];
+    if (type !== '-' && type !== 'd') throw new Error('invalid_archive');
+  }
   return entries;
 }
 
@@ -376,7 +401,7 @@ export async function planRestore(id, {
       if (await exists(target)) {
         operations.push({ type: 'repository', name: repo.name, action: 'skip-existing', target });
       } else if (repo.remote) {
-        operations.push({ type: 'repository', name: repo.name, action: 'clone', remote: repo.remote, branch: repo.branch || null, target });
+        operations.push({ type: 'repository', name: repo.name, action: 'clone', remote: sanitizeGitRemote(repo.remote), branch: repo.branch || null, target });
       } else if (manifest.includeRepoFiles && await exists(path.join(staging, 'repos', repo.name))) {
         operations.push({ type: 'repository', name: repo.name, action: 'copy-portable-files', target });
       } else {
@@ -438,6 +463,10 @@ export async function executeRestore(planToken, { now = Date.now() } = {}) {
       if (operation.action === 'clone') {
         if (await exists(operation.target)) {
           results.push({ ...operation, status: 'skipped-existing' });
+          continue;
+        }
+        if (!operation.remote) {
+          results.push({ ...operation, status: 'skipped-unavailable' });
           continue;
         }
         await mkdir(path.dirname(operation.target), { recursive: true });
