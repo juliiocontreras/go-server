@@ -1,6 +1,6 @@
 {
   "name": "go-server",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,6 +13,9 @@
     "doctor": "bash scripts/doctor.sh",
     "install": "bash scripts/install.sh",
     "maintenance": "bash scripts/maintenance.sh"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
   },
   "engines": {
     "node": ">=20"

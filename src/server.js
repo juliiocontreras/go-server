@@ -2,11 +2,21 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import QRCode from 'qrcode';
 import { getConfig } from './config.js';
 import { loadEnvFile } from './env.js';
 import { systemSnapshot } from './system.js';
 import { discoverProjects, pm2Processes, pm2Action, pm2Logs } from './projects.js';
 import { inspectRepository, findAvailablePort, provisionApp } from './apps.js';
+import {
+  remoteStatus,
+  startCloudflareQuickTunnel,
+  stopCloudflareQuickTunnel,
+  enableTailscaleServe,
+  disableTailscaleServe,
+  cloudflareHostnameGuide,
+  validateShareUrl
+} from './remote.js';
 
 const exec = promisify(execFile);
 const cfg = getConfig(loadEnvFile());
@@ -64,6 +74,44 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {ok:true, system, projects, processes, reposDir:cfg.reposDir});
     }
 
+    if (url.pathname === '/api/remote/status') {
+      return json(res, 200, {ok:true, ...(await remoteStatus())});
+    }
+
+    if (url.pathname === '/api/remote/cloudflare/start' && req.method === 'POST') {
+      const input = await body(req);
+      const result = await startCloudflareQuickTunnel({name:input.name, port:input.port});
+      return json(res, 200, {ok:true, ...result});
+    }
+
+    if (url.pathname === '/api/remote/cloudflare/stop' && req.method === 'POST') {
+      const input = await body(req);
+      const result = await stopCloudflareQuickTunnel(input.name);
+      return json(res, 200, {ok:true, ...result});
+    }
+
+    if (url.pathname === '/api/remote/tailscale/serve' && req.method === 'POST') {
+      const input = await body(req);
+      const result = await enableTailscaleServe(input.port);
+      return json(res, 200, {ok:true, ...result});
+    }
+
+    if (url.pathname === '/api/remote/tailscale/reset' && req.method === 'POST') {
+      return json(res, 200, {ok:true, ...(await disableTailscaleServe())});
+    }
+
+    if (url.pathname === '/api/remote/cloudflare/hostname/guide' && req.method === 'POST') {
+      const input = await body(req);
+      return json(res, 200, {ok:true, ...cloudflareHostnameGuide(input.hostname, input.port)});
+    }
+
+    if (url.pathname === '/api/qr') {
+      const shareUrl = validateShareUrl(url.searchParams.get('url') || '');
+      const svg = await QRCode.toString(shareUrl, {type:'svg', margin:1, errorCorrectionLevel:'M', width:240});
+      res.writeHead(200, {'content-type':'image/svg+xml; charset=utf-8','cache-control':'no-store'});
+      return res.end(svg);
+    }
+
     if (url.pathname === '/api/update' && req.method === 'POST') {
       const { stdout, stderr } = await exec('bash', ['scripts/self-update.sh'], {cwd:process.cwd(), timeout:120000});
       return json(res, 200, {ok:true, stdout:stdout.trim(), stderr:stderr.trim()});
@@ -83,7 +131,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/process/logs') {
       const name = url.searchParams.get('name') || '';
       const lines = url.searchParams.get('lines') || 80;
-      const logs = await pm2Logs(name, lines);
+      logs = await pm2Logs(name, lines);
       return json(res, 200, {ok:true, name, logs});
     }
 
@@ -113,7 +161,11 @@ const server = http.createServer(async (req, res) => {
 
     json(res,404,{error:'not_found'});
   } catch (e) {
-    const known = ['invalid_process_name','invalid_action','process_not_found','request_too_large','invalid_repository_url','invalid_project_name','invalid_port','unsupported_stack','no_available_port'];
+    const known = [
+      'invalid_process_name','invalid_action','process_not_found','request_too_large','invalid_repository_url',
+      'invalid_project_name','invalid_port','unsupported_stack','no_available_port','invalid_tunnel_name',
+      'invalid_hostname','invalid_share_url','cloudflared_not_installed','tailscale_not_installed'
+    ];
     json(res, known.includes(e.message) ? 400 : 500, {error: known.includes(e.message) ? e.message : 'internal_error', message:e.message});
   }
 });

@@ -19,6 +19,12 @@ fi
 check "PM2 disponible" pm2 --version
 [ -f .env ] && echo "✅ Configuración .env" || { echo "❌ Falta .env"; FAIL=1; }
 [ -d "${HOME}/repos" ] && echo "✅ Carpeta de repositorios" || echo "ℹ️  La carpeta ~/repos aún no existe o se configuró otra ruta"
+if command -v cloudflared >/dev/null 2>&1; then echo "✅ Cloudflare Tunnel disponible ($(cloudflared --version 2>/dev/null | head -1))"; else echo "ℹ️  cloudflared no está instalado; el acceso público temporal estará desactivado"; fi
+if command -v tailscale >/dev/null 2>&1; then
+  if tailscale status >/dev/null 2>&1; then echo "✅ Tailscale conectado"; else echo "ℹ️  Tailscale está instalado pero aún no está conectado"; fi
+else
+  echo "ℹ️  Tailscale no está instalado; es opcional para acceso privado HTTPS"
+fi
 if command -v pm2 >/dev/null 2>&1 && pm2 describe go-server >/dev/null 2>&1; then
   echo "✅ Servicio go-server registrado en PM2"
 else
@@ -32,9 +38,5 @@ else
 fi
 
 echo
-if [ "$FAIL" -eq 0 ]; then
-  echo "🎉 Todo se ve bien."
-else
-  echo "⚠️  Hay elementos por corregir. Revisa: pm2 logs go-server"
-fi
+if [ "$FAIL" -eq 0 ]; then echo "🎉 Todo se ve bien."; else echo "⚠️  Hay elementos por corregir. Revisa: pm2 logs go-server"; fi
 exit "$FAIL"
