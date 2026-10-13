@@ -4,6 +4,7 @@ const token = $('#token');
 const remember = $('#remember');
 const saved = localStorage.getItem('go-server-token');
 let currentShareUrl = '';
+let activeRestorePlan = '';
 if (saved) { token.value = saved; remember.checked = true; }
 
 function saveToken() {
@@ -79,6 +80,69 @@ async function renderRemoteStatus() {
   } catch (e) { box.innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
 }
 
+function backupDate(value) {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : '—';
+}
+
+function renderBackups(backups = [], backupsDir = '') {
+  const box = $('#backupList');
+  $('#backupMeta').textContent = `Retención: 7 diarios + 4 semanales${backupsDir ? ` · ${backupsDir}` : ''}`;
+  if (!backups.length) {
+    box.innerHTML = '<div class="empty">Aún no hay snapshots locales.</div>';
+    return;
+  }
+  box.innerHTML = backups.map(b => `<article class="backup-item"><div class="backup-main"><strong>${esc(b.id)}</strong><small>${esc(backupDate(b.createdAt))} · ${esc(memoryLabel(b.size))} · ${b.repositoryCount ?? 0} repos · SHA ${esc((b.sha256 || '').slice(0,12))}…</small></div><span class="pill ${b.includeRepoFiles?'warn':''}">${b.includeRepoFiles?'Con archivos':'Portable'}</span><div class="actions"><button class="secondary" data-backup-verify="${esc(b.id)}">Verificar</button><button data-backup-plan="${esc(b.id)}">Preparar restauración</button></div></article>`).join('');
+  box.querySelectorAll('[data-backup-verify]').forEach(btn => btn.onclick = () => verifyBackup(btn.dataset.backupVerify));
+  box.querySelectorAll('[data-backup-plan]').forEach(btn => btn.onclick = () => prepareRestore(btn.dataset.backupPlan));
+}
+
+async function loadBackups() {
+  if (!token.value) return;
+  const d = await api('/api/backups');
+  renderBackups(d.backups, d.backupsDir);
+}
+
+async function verifyBackup(id) {
+  try {
+    out.textContent = `Verificando ${id}…`;
+    const d = await api(`/api/backups/${encodeURIComponent(id)}/verify`, {method:'POST', body:'{}'});
+    out.textContent = d.verification.ok ? `${id}: integridad SHA-256 correcta.` : `${id}: checksum no coincide.`;
+  } catch (e) { out.textContent = e.message; }
+}
+
+async function prepareRestore(id) {
+  activeRestorePlan = '';
+  $('#confirmRestore').disabled = true;
+  try {
+    const d = await api(`/api/backups/${encodeURIComponent(id)}/restore/plan`, {method:'POST', body:'{}'});
+    const restore = d.restore;
+    activeRestorePlan = restore.planToken;
+    const ops = restore.operations.map(op => `<li><b>${esc(op.action)}</b> · ${esc(op.name || op.target || op.type)}</li>`).join('');
+    $('#restorePreview').innerHTML = `<strong>Dry run: ${esc(id)}</strong><div class="hint">Nada se ha modificado todavía. El plan expira en ${restore.expiresInSeconds}s.</div><ul class="ops">${ops || '<li>Sin cambios requeridos.</li>'}</ul><div class="hint">${restore.warnings.map(esc).join('<br>')}</div>`;
+    $('#confirmRestore').disabled = false;
+  } catch (e) {
+    $('#restorePreview').innerHTML = `<strong>No se pudo preparar.</strong><div class="hint">${esc(e.message)}</div>`;
+  }
+}
+
+async function executeRestorePlan() {
+  if (!activeRestorePlan) return;
+  if (!confirm('¿Ejecutar este plan? Los repositorios existentes no se sobrescribirán y los secretos no se restaurarán.')) return;
+  const planToken = activeRestorePlan;
+  activeRestorePlan = '';
+  $('#confirmRestore').disabled = true;
+  try {
+    const d = await api('/api/backups/restore/execute', {method:'POST', body:JSON.stringify({planToken})});
+    const results = d.restore.results || [];
+    $('#restorePreview').innerHTML = `<strong>Restauración finalizada.</strong><div class="hint">${results.map(r => `${esc(r.name || r.type)}: ${esc(r.status)}`).join('<br>') || 'Configuración revisada.'}</div>`;
+    out.textContent = `Backup ${d.restore.backupId} aplicado. Revisa tus apps y reinicia servicios cuando corresponda.`;
+    await refresh();
+  } catch (e) {
+    $('#restorePreview').innerHTML = `<strong>Restauración detenida.</strong><div class="hint">${esc(e.message)}</div>`;
+  }
+}
+
 async function refresh() {
   if (!token.value) return;
   $('#refresh').disabled = true;
@@ -90,7 +154,7 @@ async function refresh() {
     $('#mUptime').textContent = uptimeLabel(status.uptime);
     renderSystem(dash.system); renderProjects(dash.projects); renderProcesses(dash.processes);
     $('#reposDir').textContent = dash.reposDir;
-    await renderRemoteStatus();
+    await Promise.all([renderRemoteStatus(), loadBackups()]);
     out.textContent = `Actualizado ${new Date().toLocaleTimeString()}`;
   } catch (e) { out.textContent = e.message; }
   finally { $('#refresh').disabled = false; }
@@ -124,10 +188,10 @@ $('#tailscaleServe').onclick = async () => {
   try {
     remoteResult('Configurando acceso privado por HTTPS…');
     const d = await api('/api/remote/tailscale/serve',{method:'POST',body:JSON.stringify({port:$('#remotePort').value})});
-    remoteResult(`<strong>Tailscale Serve activo.</strong><div class="hint">Solo dispositivos autorizados de tu tailnet podrán entrar.</div>`);
+    remoteResult('<strong>Tailscale Serve activo.</strong><div class="hint">Solo dispositivos autorizados de tu tailnet podrán entrar.</div>');
     if (d.url) await setShareUrl(d.url);
     await renderRemoteStatus();
-  } catch(e){ remoteResult(`<strong>No se pudo activar Tailscale.</strong><div class="hint">${esc(e.message)} · Si no está instalado, usa la app/CLI de Tailscale y vuelve a intentarlo.</div>`); }
+  } catch(e){ remoteResult(`<strong>No se pudo activar Tailscale.</strong><div class="hint">${esc(e.message)}</div>`); }
 };
 $('#tailscaleReset').onclick = async () => {
   if(!confirm('¿Quitar la configuración Tailscale Serve de este dispositivo?')) return;
@@ -139,7 +203,7 @@ $('#cloudflareStart').onclick = async () => {
   try {
     remoteResult('Creando túnel público temporal…');
     const d = await api('/api/remote/cloudflare/start',{method:'POST',body:JSON.stringify({name:$('#remoteName').value,port:$('#remotePort').value})});
-    remoteResult(`<strong>Cloudflare Quick Tunnel activo.</strong><div class="hint">${d.url ? 'Enlace HTTPS listo para compartir.' : 'El túnel arrancó; la URL puede tardar unos segundos. Revisa los logs del proceso '+esc(d.processName)+'.'}</div>`);
+    remoteResult(`<strong>Cloudflare Quick Tunnel activo.</strong><div class="hint">${d.url ? 'Enlace HTTPS listo para compartir.' : `El túnel arrancó. Revisa los logs de ${esc(d.processName)}.`}</div>`);
     if (d.url) await setShareUrl(d.url);
     await refresh();
   } catch(e){remoteResult(`<strong>No se pudo crear el túnel.</strong><div class="hint">${esc(e.message)}</div>`);}
@@ -159,13 +223,24 @@ $('#hostnameGuide').onclick = async () => {
 $('#copyUrl').onclick = async () => { if(currentShareUrl){ await navigator.clipboard.writeText(currentShareUrl); out.textContent='Enlace copiado.'; } };
 $('#shareUrlBtn').onclick = async () => { if(!currentShareUrl)return; if(navigator.share) await navigator.share({title:'Go Server',url:currentShareUrl}); else await navigator.clipboard.writeText(currentShareUrl); };
 
+$('#createBackup').onclick = async () => {
+  const includeRepoFiles = $('#backupFiles').checked;
+  if (includeRepoFiles && !confirm('Incluir archivos locales puede generar un backup grande. Los secretos seguirán excluidos. ¿Continuar?')) return;
+  $('#createBackup').disabled = true;
+  try {
+    out.textContent = 'Creando snapshot portable…';
+    const d = await api('/api/backups/create', {method:'POST', body:JSON.stringify({includeRepoFiles})});
+    out.textContent = `${d.backup.id} creado · SHA ${d.backup.sha256.slice(0,12)}…`;
+    await loadBackups();
+  } catch (e) { out.textContent = e.message; }
+  finally { $('#createBackup').disabled = false; }
+};
+$('#reloadBackups').onclick = () => loadBackups().catch(e => out.textContent = e.message);
+$('#confirmRestore').onclick = executeRestorePlan;
+
 $('#refresh').onclick = refresh;
 $('#update').onclick = async () => { if(!confirm('¿Actualizar Go Server desde GitHub ahora?'))return; try{out.textContent='Actualizando…'; const d=await api('/api/update',{method:'POST'}); out.textContent=d.stdout||'Actualizado.';}catch(e){out.textContent=e.message;} };
 $('#sync').onclick = async () => { if(!confirm('¿Respaldar y sincronizar ahora todos los repositorios?'))return; try{out.textContent='Sincronizando repos…'; const d=await api('/api/sync',{method:'POST'}); out.textContent=[d.stdout,d.stderr].filter(Boolean).join('\n')||'Sin cambios.'; await refresh();}catch(e){out.textContent=e.message;} };
-
-fetch('/api/health').then(r=>r.json()).then(data=>{ $('#healthDot').classList.toggle('on',Boolean(data.ok)); $('#healthText').textContent=data.ok?'Servidor en línea':'Servidor no disponible'; }).catch(()=>{$('#healthText').textContent='Servidor no disponible';});
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
-if (token.value) refresh();
 
 function deployMessage(html) { $('#deployResult').innerHTML = html; }
 $('#inspectRepo').onclick = async () => {
@@ -184,3 +259,7 @@ $('#deployRepo').onclick = async () => {
   catch (e) { deployMessage(`<strong>No se pudo desplegar.</strong><div class="hint">${esc(e.message)}</div>`); }
   finally { $('#deployRepo').disabled = false; $('#inspectRepo').disabled = false; }
 };
+
+fetch('/api/health').then(r=>r.json()).then(data=>{ $('#healthDot').classList.toggle('on',Boolean(data.ok)); $('#healthText').textContent=data.ok?'Servidor en línea':'Servidor no disponible'; }).catch(()=>{$('#healthText').textContent='Servidor no disponible';});
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+if (token.value) refresh();

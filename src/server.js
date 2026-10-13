@@ -8,6 +8,7 @@ import { loadEnvFile } from './env.js';
 import { systemSnapshot } from './system.js';
 import { discoverProjects, pm2Processes, pm2Action, pm2Logs } from './projects.js';
 import { inspectRepository, findAvailablePort, provisionApp } from './apps.js';
+import { createBackup, listBackups, verifyBackup, planRestore, executeRestore } from './backups.js';
 import {
   remoteStatus,
   startCloudflareQuickTunnel,
@@ -74,6 +75,39 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {ok:true, system, projects, processes, reposDir:cfg.reposDir});
     }
 
+    if (url.pathname === '/api/backups' && req.method === 'GET') {
+      return json(res, 200, {ok:true, backups:await listBackups({backupsDir:cfg.backupsDir}), backupsDir:cfg.backupsDir});
+    }
+
+    if (url.pathname === '/api/backups/create' && req.method === 'POST') {
+      const input = await body(req);
+      const backup = await createBackup({
+        rootDir: process.cwd(), reposDir: cfg.reposDir, backupsDir: cfg.backupsDir,
+        includeRepoFiles: input.includeRepoFiles === true
+      });
+      return json(res, 200, {ok:true, backup});
+    }
+
+    const verifyMatch = url.pathname.match(/^\/api\/backups\/([^/]+)\/verify$/);
+    if (verifyMatch && req.method === 'POST') {
+      const verification = await verifyBackup(decodeURIComponent(verifyMatch[1]), {backupsDir:cfg.backupsDir});
+      return json(res, 200, {ok:true, verification});
+    }
+
+    const restorePlanMatch = url.pathname.match(/^\/api\/backups\/([^/]+)\/restore\/plan$/);
+    if (restorePlanMatch && req.method === 'POST') {
+      const restore = await planRestore(decodeURIComponent(restorePlanMatch[1]), {
+        backupsDir: cfg.backupsDir, reposDir: cfg.reposDir, rootDir: process.cwd()
+      });
+      return json(res, 200, {ok:true, restore});
+    }
+
+    if (url.pathname === '/api/backups/restore/execute' && req.method === 'POST') {
+      const input = await body(req);
+      const restore = await executeRestore(input.planToken);
+      return json(res, 200, {ok:true, restore});
+    }
+
     if (url.pathname === '/api/remote/status') {
       return json(res, 200, {ok:true, ...(await remoteStatus())});
     }
@@ -131,7 +165,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/process/logs') {
       const name = url.searchParams.get('name') || '';
       const lines = url.searchParams.get('lines') || 80;
-      logs = await pm2Logs(name, lines);
+      const logs = await pm2Logs(name, lines);
       return json(res, 200, {ok:true, name, logs});
     }
 
@@ -164,7 +198,9 @@ const server = http.createServer(async (req, res) => {
     const known = [
       'invalid_process_name','invalid_action','process_not_found','request_too_large','invalid_repository_url',
       'invalid_project_name','invalid_port','unsupported_stack','no_available_port','invalid_tunnel_name',
-      'invalid_hostname','invalid_share_url','cloudflared_not_installed','tailscale_not_installed'
+      'invalid_hostname','invalid_share_url','cloudflared_not_installed','tailscale_not_installed',
+      'invalid_backup_id','backup_checksum_mismatch','invalid_archive','unsupported_backup_format',
+      'restore_plan_invalid','restore_plan_expired'
     ];
     json(res, known.includes(e.message) ? 400 : 500, {error: known.includes(e.message) ? e.message : 'internal_error', message:e.message});
   }
