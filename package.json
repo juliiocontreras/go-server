@@ -11,7 +11,7 @@
     "self-update": "bash scripts/self-update.sh",
     "setup": "node scripts/configure.mjs",
     "doctor": "bash scripts/doctor.sh",
-    "install": "bash scripts/install.sh",
+    "install:server": "bash scripts/install.sh",
     "maintenance": "bash scripts/maintenance.sh"
   },
   "dependencies": {
