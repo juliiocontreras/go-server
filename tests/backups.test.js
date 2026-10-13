@@ -8,7 +8,8 @@ import {
   isSecretPath,
   sha256File,
   createManifest,
-  applyRetention
+  applyRetention,
+  sanitizeGitRemote
 } from '../src/backups.js';
 
 test('backup ids only accept Go Server timestamp format', () => {
@@ -22,6 +23,12 @@ test('secret paths are excluded by default', () => {
   const safe = ['README.md', 'src/server.js', 'public/app.js', 'config/settings.json'];
   for (const value of secret) assert.equal(isSecretPath(value), true, value);
   for (const value of safe) assert.equal(isSecretPath(value), false, value);
+});
+
+test('git remotes never persist embedded HTTPS credentials', () => {
+  assert.equal(sanitizeGitRemote('https://ghp_secret@github.com/user/repo.git'), 'https://github.com/user/repo.git');
+  assert.equal(sanitizeGitRemote('https://user:secret@github.com/user/repo.git?token=oops'), 'https://github.com/user/repo.git');
+  assert.equal(sanitizeGitRemote('git@github.com:user/repo.git'), 'git@github.com:user/repo.git');
 });
 
 test('sha256 changes when archive bytes change', async () => {
@@ -45,12 +52,13 @@ test('manifest is portable and records repo metadata without source absolute pat
     platform: 'android',
     reposDir: '/data/data/com.termux/files/home/repos',
     includeRepoFiles: false,
-    repositories: [{ name: 'rutie', branch: 'main', commit: 'abc123', remote: 'git@github.com:juliiocontreras/rutie.git' }],
+    repositories: [{ name: 'rutie', branch: 'main', commit: 'abc123', remote: 'https://secret@github.com/juliiocontreras/rutie.git' }],
     createdAt: '2026-10-13T20:30:00.000Z'
   });
   assert.equal(manifest.formatVersion, 1);
   assert.equal(manifest.includeRepoFiles, false);
   assert.equal(manifest.repositories[0].name, 'rutie');
+  assert.equal(manifest.repositories[0].remote, 'https://github.com/juliiocontreras/rutie.git');
   assert.equal(JSON.stringify(manifest).includes('/data/data/com.termux/files/home/repos'), false);
   assert.ok(manifest.excludedSecrets.includes('.env'));
 });
